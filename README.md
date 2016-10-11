@@ -12,7 +12,7 @@ git clone https://github.com/nabto/echo-stream-tester.git
 
 ## Add the Nabto Client SDK Libraries
 
-Download the *Nabto Client SDK Libraries* from [developer.nabto.com](developer.nabto.com) and unpack them to get the following folder structure.
+Download the *Nabto Client SDK Libraries* from [developer.nabto.com](https://developer.nabto.com/) and unpack them to get the following folder structure.
 
 ```
 echo-stream-tester/
@@ -27,7 +27,7 @@ echo-stream-tester/
 
 ## Add the Nabto Client SDK Resources
 
-Download the *Nabto Client SDK Resources* from [developer.nabto.com](developer.nabto.com) and unpack them to get the following folder structure.
+Download the *Nabto Client SDK Resources* from [developer.nabto.com](https://developer.nabto.com/) and unpack them to get the following folder structure.
 
 ```
 echo-stream-tester/
