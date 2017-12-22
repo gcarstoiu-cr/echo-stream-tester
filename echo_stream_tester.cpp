@@ -5,8 +5,12 @@
 
 #include <nabto_client_api.h>
 
+// If enabled, it will test the streaming duration. If disabled, it will
+// test only the connection establishment duration.
+#define REMOTE_STREAM_ENABLE    (1)
+
 static int as_integer(nabto_status_t const status);
-static size_t reader(nabto_stream_t stream);
+static size_t reader(nabto_stream_t stream, size_t dataSize);
 static int testRun(std::string deviceId, size_t dataSize);
 
 int main(int argc, char* argv[]) {
@@ -26,21 +30,32 @@ int as_integer(nabto_status_t const status) {
     return static_cast<std::underlying_type<nabto_status_t>::type>(status);
 }
 
-size_t reader(nabto_stream_t stream) {
+size_t reader(nabto_stream_t stream, size_t dataSize)
+{
     nabto_status_t status;
     char* buffer;
     size_t len, readBytes = 0;
 
-    for (;;) {
+    for (;;)
+    {
         status = nabtoStreamRead(stream, &buffer, &len);
-        if (status == NABTO_INVALID_STREAM || status == NABTO_STREAM_CLOSED) {
+        if (status == NABTO_INVALID_STREAM || status == NABTO_STREAM_CLOSED)
+        {
+            std::cout << "-->Stream closed by remote device with status: "
+                      << nabtoStatusStr(status) << std::endl;
             break;
-        } else if (status != NABTO_OK) {
+        }
+        else if (status != NABTO_OK)
+        {
             std::cout << "Nabto read error: " << as_integer(status)
                       << std::endl;
             break;
         }
         readBytes += len;
+        if (readBytes >= dataSize)
+        {
+            break;
+        }
         nabtoFree(buffer);
     }
     return readBytes;
@@ -70,6 +85,7 @@ int testRun(std::string deviceId, size_t dataSize) {
         return 1;
     }
 
+    auto streamOpened = std::chrono::high_resolution_clock::now();
     // Open a nabto stream
     status = nabtoStreamOpen(&stream, session, deviceId.c_str());
     if (status != NABTO_OK) {
@@ -79,12 +95,13 @@ int testRun(std::string deviceId, size_t dataSize) {
         return 1;
     }
 
-    // Send the command 'echo\n' to the server. If the command is accepted '+\n'
+#if REMOTE_STREAM_ENABLE
+    // Send the command '<dataSize>\n' to the server. If the command is accepted '+\n'
     // will be returned, if not '-\n'.
     std::cout << "Sending echo command..." << std::endl;
     bool accepted = false;
 
-    std::string cmd = "echo\n";
+    std::string cmd = std::to_string(dataSize);
     status = nabtoStreamWrite(stream, cmd.c_str(), cmd.size());
     if (status != NABTO_OK) {
         std::cerr << "Error " << as_integer(status)
@@ -142,33 +159,49 @@ int testRun(std::string deviceId, size_t dataSize) {
         return 1;
     }
 
+    nabto_connection_type_t connectionType;
+    status = nabtoStreamConnectionType(stream, &connectionType);
+    if (status != NABTO_OK) {
+            std::cerr << "Error " << as_integer(status)
+                      << " reading from nabto stream: "
+                      << nabtoStatusStr(status) << std::endl;
+            return 1;
+    }
+
+    std::cout << "Connection type with remote device: ";
+    switch (connectionType)
+    {
+        case NCT_LOCAL:
+            std::cout << "[Local network]" << std::endl;
+            break;
+
+        case NCT_P2P:
+            std::cout << "[P2P]" << std::endl;
+            break;
+
+        case NCT_RELAY:
+            std::cout << "[Relay]" << std::endl;
+            break;
+
+        default:
+            std::cout << "other (" << connectionType << ")" << std::endl;
+            break;
+    }
+
     std::cout << "Running echo test..." << std::endl;
 
     auto startEcho = std::chrono::high_resolution_clock::now();
 
     // Read data from server (separate thread)
-    auto readerFuture = std::async(std::launch::async, reader, stream);
+    auto readerFuture = std::async(std::launch::async, reader, stream, dataSize);
 
-    // Write data to server
-    size_t wroteBytes = 0;
-    char chunk[2048];
-    std::memset(chunk, 0, sizeof(chunk));
-    while (dataSize > 0) {
-        size_t toWrite = (dataSize < sizeof(chunk)) ? dataSize : sizeof(chunk);
+    // Wait for reader to finish
+    size_t readBytes = readerFuture.get();
 
-        status = nabtoStreamWrite(stream, chunk, toWrite);
-        if (status != NABTO_OK && status != NABTO_BUFFER_FULL) {
-            std::cerr << "Error " << as_integer(status)
-                      << " writing to nabto stream: " << nabtoStatusStr(status)
-                      << std::endl;
-            return 1;
-        }
-
-        if (status == NABTO_OK) {
-            wroteBytes += toWrite;
-            dataSize -= toWrite;
-        }
-    }
+    auto durationStream = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::high_resolution_clock::now() - startEcho)
+                        .count();
+#endif
 
     // Close stream
     status = nabtoStreamClose(stream);
@@ -178,13 +211,10 @@ int testRun(std::string deviceId, size_t dataSize) {
                   << std::endl;
         return 1;
     }
+    auto durationConnection = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::high_resolution_clock::now() - streamOpened)
+                              .count();
 
-    // Wait for reader to finish
-    size_t readBytes = readerFuture.get();
-
-    auto durationEcho = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::high_resolution_clock::now() - startEcho)
-                        .count();
 
     // Close session properly
     nabtoCloseSession(session);
@@ -193,14 +223,19 @@ int testRun(std::string deviceId, size_t dataSize) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::high_resolution_clock::now() - start)
                         .count();
+    auto throughputKByte = (readBytes * 1000.0 / durationStream) / 1024;
+    auto throughputMbit = throughputKByte * 8 / 1024;
 
     // Print measurements
     std::cout << "Test results:" << std::endl;
-    std::cout << "  wrote:                " << wroteBytes << " bytes" << std::endl;
-    std::cout << "  read:                 " << readBytes << " bytes" << std::endl;
-    std::cout << "  duration:             " << duration << " ms" << std::endl;
-    std::cout << "  duration (echo only): " << durationEcho << " ms" << std::endl;
-
+    // std::cout << "  wrote:                " << wroteBytes << " bytes" << std::endl;
+    std::cout << "  duration (total):       " << duration << " ms" << std::endl;
+    std::cout << "  duration (connection):  " << durationConnection << " ms" << std::endl;
+#if REMOTE_STREAM_ENABLE
+    std::cout << "  duration (stream only): " << durationStream << " ms" << std::endl;
+    std::cout << "  read: " << readBytes << " bytes - throughput: " << throughputKByte << " kBps / "
+              << throughputMbit << " Mbps" << std::endl;
+#endif
     // Exit code to shell (0 for ok)
     return 0;
 }
